@@ -300,6 +300,7 @@ class Controller(Singleton):
                     self.multisig_wallet_descriptor = None
                     self.unverified_address = None
                     self.address_explorer_data = None
+                    self.sign_message_data = None
                     self.psbt = None
                     self.psbt_parser = None
                     self.psbt_seed = None

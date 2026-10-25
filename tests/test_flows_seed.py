@@ -711,6 +711,103 @@ class TestMessageSigningFlows(FlowTest):
         ])
 
 
+    def test_sign_message_error_clears_review_state(self):
+        """A failed signing flow must not supply review pages or a seed to the next one."""
+        from seedsigner.helpers import embit_utils
+        from seedsigner.views.view import UnhandledExceptionView
+
+        self.settings.set_value(SettingsConstants.SETTING__MESSAGE_SIGNING, SettingsConstants.OPTION__ENABLED)
+        seed = Seed(mnemonic=("abandon " * 11 + "about").split())
+        self.controller.storage.set_pending_seed(seed)
+        self.controller.storage.finalize_pending_seed()
+
+        def load_first_message(view):
+            self.load_signmessage_into_decoder(view, self.MAINNET_DERIVATION_PATH, "First message")
+
+        self.run_sequence([
+            FlowStep(MainMenuView, button_data_selection=MainMenuView.SCAN),
+            FlowStep(scan_views.ScanView, before_run=load_first_message),
+            FlowStep(seed_views.SeedSignMessageStartView, is_redirect=True),
+            FlowStep(seed_views.SeedSelectSeedView, screen_return_value=0),
+            FlowStep(seed_views.SeedSignMessageConfirmMessageView, before_run=self.inject_mesage_as_paged_message, screen_return_value=0),
+            FlowStep(seed_views.SeedSignMessageConfirmAddressView, screen_return_value=Exception("Test exception")),
+            FlowStep(UnhandledExceptionView, screen_return_value=0),
+            FlowStep(MainMenuView),
+        ])
+
+        assert self.controller.sign_message_data is None
+        assert self.controller.resume_main_flow is None
+        assert self.controller.storage.seeds == [seed]
+
+        def review_new_message(view):
+            assert "paged_message" not in self.controller.sign_message_data
+            self.inject_mesage_as_paged_message(view)
+            pages = self.controller.sign_message_data["paged_message"]
+            assert " ".join(" ".join(pages).split()) == self.SHORT_MESSAGE
+
+        with patch("seedsigner.helpers.embit_utils.sign_message", wraps=embit_utils.sign_message) as mock_sign:
+            self.run_sequence([
+                FlowStep(MainMenuView, button_data_selection=MainMenuView.SCAN),
+                FlowStep(scan_views.ScanView, before_run=self.load_short_message_into_decoder),
+                FlowStep(seed_views.SeedSignMessageStartView, is_redirect=True),
+                FlowStep(seed_views.SeedSelectSeedView, screen_return_value=0),
+                FlowStep(seed_views.SeedSignMessageConfirmMessageView, before_run=review_new_message, screen_return_value=0),
+                FlowStep(seed_views.SeedSignMessageConfirmAddressView, screen_return_value=0),
+                FlowStep(seed_views.SeedSignMessageSignedMessageQRView, screen_return_value=0),
+                FlowStep(MainMenuView),
+            ])
+
+        mock_sign.assert_called_once_with(
+            seed_bytes=seed.seed_bytes,
+            derivation=self.MAINNET_DERIVATION_PATH.replace("h", "'"),
+            msg=self.SHORT_MESSAGE.encode(),
+        )
+        assert self.controller.sign_message_data is None
+
+
+    def test_sign_message_cancel_then_discard_requires_seed_selection(self):
+        """A canceled message scan must not retain a seed after the user discards it."""
+        self.settings.set_value(SettingsConstants.SETTING__MESSAGE_SIGNING, SettingsConstants.OPTION__ENABLED)
+        seed = Seed(mnemonic=("abandon " * 11 + "about").split())
+        self.controller.storage.set_pending_seed(seed)
+        self.controller.storage.finalize_pending_seed()
+
+        self.run_sequence([
+            FlowStep(seed_views.SeedOptionsView, button_data_selection=seed_views.SeedOptionsView.SIGN_MESSAGE),
+            FlowStep(scan_views.ScanView),  # Cancel without scanning a message.
+            FlowStep(MainMenuView, button_data_selection=MainMenuView.SEEDS),
+            FlowStep(seed_views.SeedsMenuView, screen_return_value=0),
+            FlowStep(seed_views.SeedOptionsView, button_data_selection=seed_views.SeedOptionsView.DISCARD),
+            FlowStep(seed_views.SeedDiscardView, button_data_selection=seed_views.SeedDiscardView.DISCARD),
+            FlowStep(MainMenuView),
+        ], initial_destination_view_args=dict(seed=seed))
+
+        assert self.controller.storage.seeds == []
+        assert self.controller.sign_message_data is None
+
+        self.run_sequence([
+            FlowStep(MainMenuView, button_data_selection=MainMenuView.SCAN),
+            FlowStep(scan_views.ScanView, before_run=self.load_short_message_into_decoder),
+            FlowStep(seed_views.SeedSignMessageStartView, is_redirect=True),
+            FlowStep(seed_views.SeedSelectSeedView),
+        ])
+        assert self.controller.sign_message_data.get("seed") is None
+
+
+    def test_sign_message_new_request_invalidates_review_pages(self):
+        """Keep an explicitly selected seed, but rebuild review pages for a new request."""
+        self.settings.set_value(SettingsConstants.SETTING__MESSAGE_SIGNING, SettingsConstants.OPTION__ENABLED)
+        seed = Seed(mnemonic=("abandon " * 11 + "about").split())
+        self.controller.sign_message_data = dict(seed=seed, message="First message", paged_message=["First message"])
+
+        view = seed_views.SeedSignMessageStartView(self.MAINNET_DERIVATION_PATH, self.SHORT_MESSAGE)
+
+        assert view.get_redirect().View_cls == seed_views.SeedSignMessageConfirmMessageView
+        assert self.controller.sign_message_data["seed"] is seed
+        assert self.controller.sign_message_data["message"] == self.SHORT_MESSAGE
+        assert "paged_message" not in self.controller.sign_message_data
+
+
     def test_sign_message_network_mismatch_flow(self):
         """
         Should redirect to NetworkMismatchErrorView if a message's derivation path network doesn't match the current network.

@@ -2147,6 +2147,8 @@ class SeedSignMessageStartView(View):
         data["derivation_path"] = derivation_path
         data["message"] = message
         data["addr_format"] = addr_format
+        # Review pages belong to one message, even when the selected seed is reused.
+        data.pop("paged_message", None)
 
         if data.get("seed") is not None:
             # We already know which seed we're signing with
